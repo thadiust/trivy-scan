@@ -28,7 +28,7 @@ The action always produces machine-readable JSON internally to compute **`findin
 | `mode` | `both` | `fs`, `config`, or `both`. |
 | `paths` | `.` | Space-separated paths relative to `working_directory`. |
 | `severity` | `HIGH,CRITICAL` | Comma-separated severities. |
-| `ignore_unfixed` | `true` | If true, ignore vulnerabilities without a fix. |
+| `ignore_unfixed` | `true` | If true, pass **`--ignore-unfixed`** to **`trivy fs`** only (vulnerability scanner). Ignored for **`trivy config`** (misconfig has no unfixed vuln concept). |
 | `fail_on_findings` | `true` | If true, exit 1 when findings exist. |
 | `write_sarif` | `false` | If true, write SARIF to `sarif_filename`. |
 | `sarif_filename` | `trivy-results.sarif` | Path relative to `working_directory`. |

@@ -206,13 +206,22 @@ runs:
           fi
         done
 
+        # trivy fs / trivy config each accept exactly one PATH (aquasecurity/trivy validateArgs).
+        if [ "${#SCAN_PATHS[@]}" -gt 1 ]; then
+          echo "paths must list a single target (e.g. '.' for the repo). Trivy does not accept multiple PATH arguments in one invocation." >&2
+          exit 1
+        fi
+
         severity="${{ inputs.severity }}"
         ignore_unfixed="${{ inputs.ignore_unfixed }}"
 
-        common=( --quiet --no-progress --severity "$severity" )
+        # trivy fs includes DB + vulnerability flag groups (--no-progress, --ignore-unfixed).
+        # trivy config does NOT — those flags trigger flagErrorFunc → full help dump (see aquasecurity/trivy NewConfigCommand).
+        common_fs=( --quiet --no-progress --severity "$severity" )
         if [ "$ignore_unfixed" = "true" ]; then
-          common+=( --ignore-unfixed )
+          common_fs+=( --ignore-unfixed )
         fi
+        common_cfg=( --quiet --severity "$severity" )
 
         tmp_json_fs=""
         tmp_json_cfg=""
@@ -230,7 +239,7 @@ runs:
         run_fs_json() {
           tmp_json_fs="$(mktemp)"
           set +e
-          /tmp/trivy fs "${common[@]}" --format json --output "$tmp_json_fs" --exit-code 0 "${SCAN_PATHS[@]}"
+          /tmp/trivy fs "${common_fs[@]}" --format json --output "$tmp_json_fs" --exit-code 0 "${SCAN_PATHS[@]}"
           _ec=$?
           set -e
           if [ "$_ec" -ne 0 ] || [ ! -s "$tmp_json_fs" ]; then
@@ -242,7 +251,7 @@ runs:
         run_cfg_json() {
           tmp_json_cfg="$(mktemp)"
           set +e
-          /tmp/trivy config "${common[@]}" --format json --output "$tmp_json_cfg" --exit-code 0 "${SCAN_PATHS[@]}"
+          /tmp/trivy config "${common_cfg[@]}" --format json --output "$tmp_json_cfg" --exit-code 0 "${SCAN_PATHS[@]}"
           _ec=$?
           set -e
           if [ "$_ec" -ne 0 ] || [ ! -s "$tmp_json_cfg" ]; then
@@ -254,7 +263,7 @@ runs:
         run_fs_sarif() {
           tmp_sarif_fs="$(mktemp)"
           set +e
-          /tmp/trivy fs "${common[@]}" --format sarif --output "$tmp_sarif_fs" --exit-code 0 "${SCAN_PATHS[@]}"
+          /tmp/trivy fs "${common_fs[@]}" --format sarif --output "$tmp_sarif_fs" --exit-code 0 "${SCAN_PATHS[@]}"
           _ec=$?
           set -e
           if [ "$_ec" -ne 0 ] || [ ! -s "$tmp_sarif_fs" ]; then
@@ -266,7 +275,7 @@ runs:
         run_cfg_sarif() {
           tmp_sarif_cfg="$(mktemp)"
           set +e
-          /tmp/trivy config "${common[@]}" --format sarif --output "$tmp_sarif_cfg" --exit-code 0 "${SCAN_PATHS[@]}"
+          /tmp/trivy config "${common_cfg[@]}" --format sarif --output "$tmp_sarif_cfg" --exit-code 0 "${SCAN_PATHS[@]}"
           _ec=$?
           set -e
           if [ "$_ec" -ne 0 ] || [ ! -s "$tmp_sarif_cfg" ]; then
