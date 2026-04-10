@@ -14,9 +14,9 @@ outputs:
 
 inputs:
   trivy_version:
-    description: "Exact Trivy release version (no v prefix)"
+    description: "Exact Trivy release version (no v prefix); must exist on aquasecurity/trivy releases"
     required: false
-    default: "0.65.0"
+    default: "0.69.3"
 
   working_directory:
     description: "Directory to scan (repo root relative)"
@@ -138,8 +138,14 @@ runs:
         VERSION="${{ inputs.trivy_version }}"
         ASSET="trivy_${VERSION}_Linux-64bit.tar.gz"
         BASE_URL="https://github.com/aquasecurity/trivy/releases/download/v${VERSION}"
-        curl -fSL "${BASE_URL}/trivy_${VERSION}_checksums.txt" -o /tmp/trivy_checksums.txt
-        curl -fSL "${BASE_URL}/${ASSET}" -o "/tmp/${ASSET}"
+        if ! curl -fSL "${BASE_URL}/trivy_${VERSION}_checksums.txt" -o /tmp/trivy_checksums.txt; then
+          echo "Failed to download Trivy checksums (HTTP 404?). Check trivy_version exists: https://github.com/aquasecurity/trivy/releases/tag/v${VERSION}" >&2
+          exit 22
+        fi
+        if ! curl -fSL "${BASE_URL}/${ASSET}" -o "/tmp/${ASSET}"; then
+          echo "Failed to download ${ASSET}. Wrong version or asset rename — see https://github.com/aquasecurity/trivy/releases" >&2
+          exit 22
+        fi
         EXPECTED="$(awk -v f="${ASSET}" '$2 == f { print $1; exit }' /tmp/trivy_checksums.txt)"
         if [ -z "${EXPECTED}" ]; then
           echo "No SHA256 line for ${ASSET} in upstream checksums (wrong trivy_version or renamed asset?)." >&2

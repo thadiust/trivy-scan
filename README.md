@@ -23,7 +23,7 @@ The action always produces machine-readable JSON internally to compute **`findin
 
 | Input | Default | Description |
 |------|---------|-------------|
-| `trivy_version` | `0.65.0` | Release version (no `v` prefix). |
+| `trivy_version` | `0.69.3` | Release version (no `v` prefix); must match a real [Trivy release](https://github.com/aquasecurity/trivy/releases). |
 | `working_directory` | `.` | Directory to scan (relative to repo root). |
 | `mode` | `both` | `fs`, `config`, or `both`. |
 | `paths` | `.` | Space-separated paths relative to `working_directory`. |
