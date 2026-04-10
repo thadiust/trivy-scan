@@ -71,5 +71,5 @@ git remote add origin https://github.com/thadiust/trivy-scan.git   # skip if alr
 git push -u origin main
 ```
 
-3. After the first push, **`thadiust/trivy-scan@main`** resolves and **`workflow-python`** CI can use it. Remove any temporary **actionlint** ignore for this action in `workflow-python` if you added one while the repo was missing.
+3. After the first push, **`thadiust/trivy-scan@main`** resolves and **`workflow-python`** CI can use it.
 
