@@ -349,7 +349,8 @@ runs:
 
         sarif_path=""
         if [ "$WRITE_SARIF" = "true" ]; then
-          # Produce SARIF for the selected mode(s). For both, merge runs into one SARIF file.
+          # Produce SARIF for the selected mode(s). For both, merge into one SARIF *run* (GitHub Code
+          # Scanning rejects multiple runs in one file for the same upload category; see GH changelog 2025-07-21).
           if [ "$MODE" = "fs" ]; then
             if ! run_fs_sarif; then
               echo "Trivy fs SARIF generation failed." >&2
@@ -368,11 +369,32 @@ runs:
               exit 2
             fi
             jq -s '
-              {
-                version: (.[0].version // "2.1.0"),
-                "$schema": (.[0]."$schema" // .[1]."$schema"),
-                runs: ( (.[0].runs // []) + (.[1].runs // []) )
-              }
+              def first_run($d): ($d.runs // [])[0];
+              .[0] as $a | .[1] as $b |
+              (first_run($a)) as $r0 |
+              (first_run($b)) as $r1 |
+              if $r0 == null and $r1 == null then
+                error("trivy-scan: expected at least one SARIF run from fs/config")
+              elif $r0 == null then
+                { version: ($b.version // "2.1.0"), "$schema": $b."$schema", runs: [$r1] }
+              elif $r1 == null then
+                { version: ($a.version // "2.1.0"), "$schema": $a."$schema", runs: [$r0] }
+              else
+                ($r0.results // []) as $res0 |
+                ($r1.results // []) as $res1 |
+                ($r0.tool.driver.rules // []) as $rules0 |
+                ($r1.tool.driver.rules // []) as $rules1 |
+                {
+                  version: ($a.version // $b.version // "2.1.0"),
+                  "$schema": ($a."$schema" // $b."$schema"),
+                  runs: [
+                    ($r0
+                      | .results = ($res0 + $res1)
+                      | .tool.driver.rules = ($rules0 + $rules1 | unique_by(.id))
+                    )
+                  ]
+                }
+              end
             ' "$tmp_sarif_fs" "$tmp_sarif_cfg" > "$SARIF_NAME"
           fi
 
