@@ -1,0 +1,390 @@
+name: "Trivy scan (fs + config)"
+description: "Run Trivy filesystem and/or config scans with a safe CI contract; counts findings and optionally writes SARIF for upload"
+
+outputs:
+  finding_count:
+    description: "Total number of findings (vulnerabilities + misconfigurations + secrets, depending on scan mode)"
+    value: ${{ steps.trivy.outputs.finding_count }}
+  scan_status:
+    description: "Final scan status (clean, findings_found, scanner_error)"
+    value: ${{ steps.trivy.outputs.scan_status }}
+  sarif_path:
+    description: "Repo-relative path to the SARIF report when write_sarif is true (empty otherwise)"
+    value: ${{ steps.trivy.outputs.sarif_path }}
+
+inputs:
+  trivy_version:
+    description: "Exact Trivy release version (no v prefix)"
+    required: false
+    default: "0.65.0"
+
+  working_directory:
+    description: "Directory to scan (repo root relative)"
+    required: false
+    default: "."
+
+  mode:
+    description: "Which scans to run: fs, config, or both"
+    required: false
+    default: "both"
+
+  paths:
+    description: "Space-separated paths to scan (relative to working_directory)"
+    required: false
+    default: "."
+
+  severity:
+    description: "Comma-separated severities to include (UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL)"
+    required: false
+    default: "HIGH,CRITICAL"
+
+  ignore_unfixed:
+    description: "If true, ignore vulnerabilities without a fix"
+    required: false
+    default: "true"
+
+  fail_on_findings:
+    description: "Fail the action when one or more findings are reported"
+    required: false
+    default: "true"
+
+  write_sarif:
+    description: "Write a SARIF 2.1 report to sarif_filename (for GitHub Code Scanning upload)"
+    required: false
+    default: "false"
+
+  sarif_filename:
+    description: "SARIF file path relative to working_directory (used when write_sarif is true)"
+    required: false
+    default: "trivy-results.sarif"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Validate inputs
+      shell: bash
+      run: |
+        set -euo pipefail
+        WD="${{ inputs.working_directory }}"
+        if [ -z "$WD" ]; then
+          echo "working_directory must be a non-empty relative path." >&2
+          exit 1
+        fi
+        case "$WD" in
+          /*)
+            echo "working_directory must be relative (no leading slash): $WD" >&2
+            exit 1
+            ;;
+        esac
+        if [[ "$WD" =~ (^|/)\.\.(/|$) ]]; then
+          echo "working_directory must not traverse parents (..): $WD" >&2
+          exit 1
+        fi
+        if [ ! -d "$GITHUB_WORKSPACE/$WD" ]; then
+          echo "working_directory not found or not a directory: $WD" >&2
+          exit 1
+        fi
+
+        case "${{ inputs.mode }}" in
+          fs|config|both) ;;
+          *)
+            echo "Unsupported mode: ${{ inputs.mode }}. Use fs, config, or both." >&2
+            exit 1
+            ;;
+        esac
+
+        case "${{ inputs.fail_on_findings }}" in
+          true|false) ;;
+          *)
+            echo "Unsupported fail_on_findings: ${{ inputs.fail_on_findings }}. Use true or false." >&2
+            exit 1
+            ;;
+        esac
+        case "${{ inputs.ignore_unfixed }}" in
+          true|false) ;;
+          *)
+            echo "Unsupported ignore_unfixed: ${{ inputs.ignore_unfixed }}. Use true or false." >&2
+            exit 1
+            ;;
+        esac
+        case "${{ inputs.write_sarif }}" in
+          true|false) ;;
+          *)
+            echo "Unsupported write_sarif: ${{ inputs.write_sarif }}. Use true or false." >&2
+            exit 1
+            ;;
+        esac
+
+        SARIF_NAME="${{ inputs.sarif_filename }}"
+        if [ -z "$SARIF_NAME" ]; then
+          echo "sarif_filename must be non-empty (use write_sarif=false to skip SARIF)." >&2
+          exit 1
+        fi
+        case "$SARIF_NAME" in
+          /*)
+            echo "sarif_filename must be relative (no leading slash): $SARIF_NAME" >&2
+            exit 1
+            ;;
+        esac
+        if [[ "$SARIF_NAME" =~ (^|/)\.\.(/|$) ]]; then
+          echo "sarif_filename must not traverse parents (..): $SARIF_NAME" >&2
+          exit 1
+        fi
+
+    - name: Install Trivy
+      shell: bash
+      run: |
+        set -euo pipefail
+        VERSION="${{ inputs.trivy_version }}"
+        ASSET="trivy_${VERSION}_Linux-64bit.tar.gz"
+        BASE_URL="https://github.com/aquasecurity/trivy/releases/download/v${VERSION}"
+        curl -fSL "${BASE_URL}/trivy_${VERSION}_checksums.txt" -o /tmp/trivy_checksums.txt
+        curl -fSL "${BASE_URL}/${ASSET}" -o "/tmp/${ASSET}"
+        EXPECTED="$(awk -v f="${ASSET}" '$2 == f { print $1; exit }' /tmp/trivy_checksums.txt)"
+        if [ -z "${EXPECTED}" ]; then
+          echo "No SHA256 line for ${ASSET} in upstream checksums (wrong trivy_version or renamed asset?)." >&2
+          exit 1
+        fi
+        ACTUAL="$(sha256sum "/tmp/${ASSET}" | awk '{ print $1 }')"
+        if [ "${EXPECTED}" != "${ACTUAL}" ]; then
+          echo "SHA256 mismatch for ${ASSET} (expected ${EXPECTED}, got ${ACTUAL})." >&2
+          exit 1
+        fi
+        rm -f /tmp/trivy_checksums.txt
+        tar -xzf "/tmp/${ASSET}" -C /tmp
+        rm -f "/tmp/${ASSET}"
+        chmod +x /tmp/trivy
+        /tmp/trivy --version
+
+    - name: Run Trivy
+      id: trivy
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: |
+        set -euo pipefail
+
+        if ! command -v jq >/dev/null 2>&1; then
+          echo "jq is required but was not found on PATH (install jq on self-hosted runners)." >&2
+          exit 1
+        fi
+
+        MODE="${{ inputs.mode }}"
+        WRITE_SARIF="${{ inputs.write_sarif }}"
+        SARIF_NAME="${{ inputs.sarif_filename }}"
+
+        if [ "$WRITE_SARIF" = "true" ]; then
+          if [[ "$SARIF_NAME" == */* ]]; then
+            mkdir -p "$(dirname -- "$SARIF_NAME")"
+          fi
+        fi
+
+        read -r -a SCAN_PATHS <<< "${{ inputs.paths }}"
+        if [ "${#SCAN_PATHS[@]}" -eq 0 ]; then
+          echo "paths must contain at least one path." >&2
+          exit 1
+        fi
+        for t in "${SCAN_PATHS[@]}"; do
+          case "$t" in
+            /*)
+              echo "paths must be relative (no leading slash): $t" >&2
+              exit 1
+              ;;
+          esac
+          if [[ "$t" =~ (^|/)\.\.(/|$) ]]; then
+            echo "paths must not traverse parents (..): $t" >&2
+            exit 1
+          fi
+          if [ ! -e "$t" ]; then
+            echo "Path does not exist: $t" >&2
+            exit 1
+          fi
+        done
+
+        severity="${{ inputs.severity }}"
+        ignore_unfixed="${{ inputs.ignore_unfixed }}"
+
+        common=( --quiet --no-progress --severity "$severity" )
+        if [ "$ignore_unfixed" = "true" ]; then
+          common+=( --ignore-unfixed )
+        fi
+
+        tmp_json_fs=""
+        tmp_json_cfg=""
+        tmp_sarif_fs=""
+        tmp_sarif_cfg=""
+
+        cleanup() {
+          [ -n "$tmp_json_fs" ] && rm -f "$tmp_json_fs"
+          [ -n "$tmp_json_cfg" ] && rm -f "$tmp_json_cfg"
+          [ -n "$tmp_sarif_fs" ] && rm -f "$tmp_sarif_fs"
+          [ -n "$tmp_sarif_cfg" ] && rm -f "$tmp_sarif_cfg"
+        }
+        trap cleanup EXIT
+
+        run_fs_json() {
+          tmp_json_fs="$(mktemp)"
+          set +e
+          /tmp/trivy fs "${common[@]}" --format json --output "$tmp_json_fs" --exit-code 0 "${SCAN_PATHS[@]}"
+          _ec=$?
+          set -e
+          if [ "$_ec" -ne 0 ] || [ ! -s "$tmp_json_fs" ]; then
+            return 1
+          fi
+          return 0
+        }
+
+        run_cfg_json() {
+          tmp_json_cfg="$(mktemp)"
+          set +e
+          /tmp/trivy config "${common[@]}" --format json --output "$tmp_json_cfg" --exit-code 0 "${SCAN_PATHS[@]}"
+          _ec=$?
+          set -e
+          if [ "$_ec" -ne 0 ] || [ ! -s "$tmp_json_cfg" ]; then
+            return 1
+          fi
+          return 0
+        }
+
+        run_fs_sarif() {
+          tmp_sarif_fs="$(mktemp)"
+          set +e
+          /tmp/trivy fs "${common[@]}" --format sarif --output "$tmp_sarif_fs" --exit-code 0 "${SCAN_PATHS[@]}"
+          _ec=$?
+          set -e
+          if [ "$_ec" -ne 0 ] || [ ! -s "$tmp_sarif_fs" ]; then
+            return 1
+          fi
+          return 0
+        }
+
+        run_cfg_sarif() {
+          tmp_sarif_cfg="$(mktemp)"
+          set +e
+          /tmp/trivy config "${common[@]}" --format sarif --output "$tmp_sarif_cfg" --exit-code 0 "${SCAN_PATHS[@]}"
+          _ec=$?
+          set -e
+          if [ "$_ec" -ne 0 ] || [ ! -s "$tmp_sarif_cfg" ]; then
+            return 1
+          fi
+          return 0
+        }
+
+        scanner_error="false"
+
+        if [ "$MODE" = "fs" ] || [ "$MODE" = "both" ]; then
+          if ! run_fs_json; then
+            scanner_error="true"
+          fi
+        fi
+        if [ "$MODE" = "config" ] || [ "$MODE" = "both" ]; then
+          if ! run_cfg_json; then
+            scanner_error="true"
+          fi
+        fi
+
+        if [ "$scanner_error" = "true" ]; then
+          echo "finding_count=0" >> "$GITHUB_OUTPUT"
+          echo "scan_status=scanner_error" >> "$GITHUB_OUTPUT"
+          echo "sarif_path=" >> "$GITHUB_OUTPUT"
+          echo "Trivy scanner error: expected JSON output was not produced." >&2
+          exit 2
+        fi
+
+        count_vulns() {
+          jq -r '
+            if type == "array" then
+              [ .[]? | .Results[]? | (.Vulnerabilities // []) | length ] | add // 0
+            else
+              [ .Results[]? | (.Vulnerabilities // []) | length ] | add // 0
+            end
+          ' "$1" 2>/dev/null || echo 0
+        }
+
+        count_misconfig() {
+          jq -r '
+            if type == "array" then
+              [ .[]? | .Results[]? | (.Misconfigurations // []) | length ] | add // 0
+            else
+              [ .Results[]? | (.Misconfigurations // []) | length ] | add // 0
+            end
+          ' "$1" 2>/dev/null || echo 0
+        }
+
+        count_secrets() {
+          jq -r '
+            if type == "array" then
+              [ .[]? | .Results[]? | (.Secrets // []) | length ] | add // 0
+            else
+              [ .Results[]? | (.Secrets // []) | length ] | add // 0
+            end
+          ' "$1" 2>/dev/null || echo 0
+        }
+
+        total=0
+        if [ -n "$tmp_json_fs" ] && [ -s "$tmp_json_fs" ]; then
+          total=$(( total + $(count_vulns "$tmp_json_fs") ))
+          total=$(( total + $(count_misconfig "$tmp_json_fs") ))
+          total=$(( total + $(count_secrets "$tmp_json_fs") ))
+        fi
+        if [ -n "$tmp_json_cfg" ] && [ -s "$tmp_json_cfg" ]; then
+          total=$(( total + $(count_vulns "$tmp_json_cfg") ))
+          total=$(( total + $(count_misconfig "$tmp_json_cfg") ))
+          total=$(( total + $(count_secrets "$tmp_json_cfg") ))
+        fi
+
+        sarif_path=""
+        if [ "$WRITE_SARIF" = "true" ]; then
+          # Produce SARIF for the selected mode(s). For both, merge runs into one SARIF file.
+          if [ "$MODE" = "fs" ]; then
+            if ! run_fs_sarif; then
+              echo "Trivy fs SARIF generation failed." >&2
+              exit 2
+            fi
+            cp "$tmp_sarif_fs" "$SARIF_NAME"
+          elif [ "$MODE" = "config" ]; then
+            if ! run_cfg_sarif; then
+              echo "Trivy config SARIF generation failed." >&2
+              exit 2
+            fi
+            cp "$tmp_sarif_cfg" "$SARIF_NAME"
+          else
+            if ! run_fs_sarif || ! run_cfg_sarif; then
+              echo "Trivy SARIF generation failed." >&2
+              exit 2
+            fi
+            jq -s '
+              {
+                version: (.[0].version // "2.1.0"),
+                "$schema": (.[0]."$schema" // .[1]."$schema"),
+                runs: ( (.[0].runs // []) + (.[1].runs // []) )
+              }
+            ' "$tmp_sarif_fs" "$tmp_sarif_cfg" > "$SARIF_NAME"
+          fi
+
+          WD="${{ inputs.working_directory }}"
+          if [ "$WD" = "." ]; then
+            sarif_path="$SARIF_NAME"
+          else
+            sarif_path="${WD%/}/$SARIF_NAME"
+          fi
+        fi
+
+        if [ "$total" -gt 0 ]; then
+          scan_status="findings_found"
+        else
+          scan_status="clean"
+        fi
+
+        echo "finding_count=$total" >> "$GITHUB_OUTPUT"
+        echo "scan_status=$scan_status" >> "$GITHUB_OUTPUT"
+        echo "sarif_path=$sarif_path" >> "$GITHUB_OUTPUT"
+
+        if [ "$total" -gt 0 ]; then
+          echo "Trivy reported $total finding(s) (mode=$MODE, severity=$severity)." >&2
+          if [ "${{ inputs.fail_on_findings }}" = "true" ]; then
+            exit 1
+          fi
+          echo "fail_on_findings=false; continuing despite findings." >&2
+        else
+          echo "No Trivy findings." >&2
+        fi

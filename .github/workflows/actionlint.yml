@@ -1,0 +1,19 @@
+name: actionlint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    uses: thadiust/workflow-python/.github/workflows/reusable-actionlint.yml@main
+    with:
+      validate_root_action_yml: true
