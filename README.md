@@ -58,3 +58,18 @@ The action always produces machine-readable JSON internally to compute **`findin
     fail_on_findings: true
 ```
 
+## Publish this repository (first time)
+
+`workflow-python` references **`uses: thadiust/trivy-scan@main`**. This folder is its **own** git repository (not the parent `security-pipeline` workspace).
+
+1. On GitHub: **New repository** → name **`trivy-scan`**, owner **`thadiust`**, **empty** (no README / .gitignore from the UI).
+2. From this directory:
+
+```bash
+cd /path/to/trivy-scan
+git remote add origin https://github.com/thadiust/trivy-scan.git   # skip if already added
+git push -u origin main
+```
+
+3. After the first push, **`thadiust/trivy-scan@main`** resolves and **`workflow-python`** CI can use it. Remove any temporary **actionlint** ignore for this action in `workflow-python` if you added one while the repo was missing.
+
