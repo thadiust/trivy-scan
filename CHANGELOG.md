@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **`scan_kind`**: **`filesystem`** (default; existing **fs** / **config** / **both** behavior) or **`image`** with required **`image_ref`** — runs **`trivy image`** (expects the image in the local Docker daemon; pair with **`docker load`** when using separate CI jobs).
 - **SARIF `mode: both`**: merge **fs** and **config** into a single SARIF **`runs[0]`** (combined **`results`**, deduped **`tool.driver.rules`** by **`id`**) so **`github/codeql-action/upload-sarif`** accepts the file (one run per category; [GitHub changelog 2025-07-21](https://github.blog/changelog/2025-07-21-code-scanning-will-stop-combining-multiple-sarif-runs-uploaded-in-the-same-sarif-file/)).
 - **Fix `trivy config`**: do not pass **`--no-progress`** or **`--ignore-unfixed`** (not registered on the config subcommand; caused flag error + full help text in CI).
 - Enforce **one** space-separated **`paths`** entry — Trivy allows a single **`PATH`** per run.

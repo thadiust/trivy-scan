@@ -1,5 +1,5 @@
-name: "Trivy scan (fs + config)"
-description: "Run Trivy filesystem and/or config scans with a safe CI contract; counts findings and optionally writes SARIF for upload"
+name: "Trivy scan (repo or image)"
+description: "Run Trivy filesystem and/or config on a checkout, or scan a container image already in the local Docker daemon; counts findings and optionally writes SARIF"
 
 outputs:
   finding_count:
@@ -13,6 +13,16 @@ outputs:
     value: ${{ steps.trivy.outputs.sarif_path }}
 
 inputs:
+  scan_kind:
+    description: "filesystem = trivy fs/config on paths under working_directory; image = trivy image IMAGE_REF (Docker daemon must have the image loaded)"
+    required: false
+    default: "filesystem"
+
+  image_ref:
+    description: "Docker image reference to scan when scan_kind is image (e.g. workflow-python-ci:scan)"
+    required: false
+    default: ""
+
   trivy_version:
     description: "Exact Trivy release version (no v prefix); must exist on aquasecurity/trivy releases"
     required: false
@@ -85,6 +95,21 @@ runs:
           exit 1
         fi
 
+        case "${{ inputs.scan_kind }}" in
+          filesystem|image) ;;
+          *)
+            echo "Unsupported scan_kind: ${{ inputs.scan_kind }}. Use filesystem or image." >&2
+            exit 1
+            ;;
+        esac
+
+        if [ "${{ inputs.scan_kind }}" = "image" ]; then
+          IR="${{ inputs.image_ref }}"
+          if [ -z "$IR" ]; then
+            echo "image_ref is required when scan_kind is image." >&2
+            exit 1
+          fi
+        else
         case "${{ inputs.mode }}" in
           fs|config|both) ;;
           *)
@@ -92,6 +117,7 @@ runs:
             exit 1
             ;;
         esac
+        fi
 
         case "${{ inputs.fail_on_findings }}" in
           true|false) ;;
@@ -177,11 +203,121 @@ runs:
         MODE="${{ inputs.mode }}"
         WRITE_SARIF="${{ inputs.write_sarif }}"
         SARIF_NAME="${{ inputs.sarif_filename }}"
+        SCAN_KIND="${{ inputs.scan_kind }}"
+        IMAGE_REF="${{ inputs.image_ref }}"
 
         if [ "$WRITE_SARIF" = "true" ]; then
           if [[ "$SARIF_NAME" == */* ]]; then
             mkdir -p "$(dirname -- "$SARIF_NAME")"
           fi
+        fi
+
+        severity="${{ inputs.severity }}"
+        ignore_unfixed="${{ inputs.ignore_unfixed }}"
+
+        # trivy fs / image share vulnerability-oriented flags; trivy config does NOT (--no-progress etc.).
+        common_fs=( --quiet --no-progress --severity "$severity" )
+        if [ "$ignore_unfixed" = "true" ]; then
+          common_fs+=( --ignore-unfixed )
+        fi
+        common_cfg=( --quiet --severity "$severity" )
+
+        count_vulns() {
+          jq -r '
+            if type == "array" then
+              [ .[]? | .Results[]? | (.Vulnerabilities // []) | length ] | add // 0
+            else
+              [ .Results[]? | (.Vulnerabilities // []) | length ] | add // 0
+            end
+          ' "$1" 2>/dev/null || echo 0
+        }
+
+        count_misconfig() {
+          jq -r '
+            if type == "array" then
+              [ .[]? | .Results[]? | (.Misconfigurations // []) | length ] | add // 0
+            else
+              [ .Results[]? | (.Misconfigurations // []) | length ] | add // 0
+            end
+          ' "$1" 2>/dev/null || echo 0
+        }
+
+        count_secrets() {
+          jq -r '
+            if type == "array" then
+              [ .[]? | .Results[]? | (.Secrets // []) | length ] | add // 0
+            else
+              [ .Results[]? | (.Secrets // []) | length ] | add // 0
+            end
+          ' "$1" 2>/dev/null || echo 0
+        }
+
+        if [ "$SCAN_KIND" = "image" ]; then
+          tmp_json_img="$(mktemp)"
+          tmp_sarif_img=""
+          cleanup_img() {
+            [ -n "$tmp_json_img" ] && rm -f "$tmp_json_img"
+            [ -n "$tmp_sarif_img" ] && rm -f "$tmp_sarif_img"
+          }
+          trap cleanup_img EXIT
+
+          set +e
+          /tmp/trivy image "${common_fs[@]}" --format json --output "$tmp_json_img" --exit-code 0 "$IMAGE_REF"
+          _ec=$?
+          set -e
+          if [ "$_ec" -ne 0 ] || [ ! -s "$tmp_json_img" ]; then
+            echo "finding_count=0" >> "$GITHUB_OUTPUT"
+            echo "scan_status=scanner_error" >> "$GITHUB_OUTPUT"
+            echo "sarif_path=" >> "$GITHUB_OUTPUT"
+            echo "Trivy image scan error: expected JSON output was not produced." >&2
+            exit 2
+          fi
+
+          total=0
+          total=$(( total + $(count_vulns "$tmp_json_img") ))
+          total=$(( total + $(count_misconfig "$tmp_json_img") ))
+          total=$(( total + $(count_secrets "$tmp_json_img") ))
+
+          sarif_path=""
+          if [ "$WRITE_SARIF" = "true" ]; then
+            tmp_sarif_img="$(mktemp)"
+            set +e
+            /tmp/trivy image "${common_fs[@]}" --format sarif --output "$tmp_sarif_img" --exit-code 0 "$IMAGE_REF"
+            _es=$?
+            set -e
+            if [ "$_es" -ne 0 ] || [ ! -s "$tmp_sarif_img" ]; then
+              echo "Trivy image SARIF generation failed." >&2
+              exit 2
+            fi
+            cp "$tmp_sarif_img" "$SARIF_NAME"
+            WD="${{ inputs.working_directory }}"
+            if [ "$WD" = "." ]; then
+              sarif_path="$SARIF_NAME"
+            else
+              sarif_path="${WD%/}/$SARIF_NAME"
+            fi
+          fi
+
+          if [ "$total" -gt 0 ]; then
+            scan_status="findings_found"
+          else
+            scan_status="clean"
+          fi
+
+          echo "finding_count=$total" >> "$GITHUB_OUTPUT"
+          echo "scan_status=$scan_status" >> "$GITHUB_OUTPUT"
+          echo "sarif_path=$sarif_path" >> "$GITHUB_OUTPUT"
+
+          if [ "$total" -gt 0 ]; then
+            echo "Trivy reported $total finding(s) (image=$IMAGE_REF, severity=$severity)." >&2
+            if [ "${{ inputs.fail_on_findings }}" = "true" ]; then
+              exit 1
+            fi
+            echo "fail_on_findings=false; continuing despite findings." >&2
+          else
+            echo "No Trivy findings." >&2
+          fi
+          exit 0
         fi
 
         read -r -a SCAN_PATHS <<< "${{ inputs.paths }}"
@@ -211,17 +347,6 @@ runs:
           echo "paths must list a single target (e.g. '.' for the repo). Trivy does not accept multiple PATH arguments in one invocation." >&2
           exit 1
         fi
-
-        severity="${{ inputs.severity }}"
-        ignore_unfixed="${{ inputs.ignore_unfixed }}"
-
-        # trivy fs includes DB + vulnerability flag groups (--no-progress, --ignore-unfixed).
-        # trivy config does NOT — those flags trigger flagErrorFunc → full help dump (see aquasecurity/trivy NewConfigCommand).
-        common_fs=( --quiet --no-progress --severity "$severity" )
-        if [ "$ignore_unfixed" = "true" ]; then
-          common_fs+=( --ignore-unfixed )
-        fi
-        common_cfg=( --quiet --severity "$severity" )
 
         tmp_json_fs=""
         tmp_json_cfg=""
@@ -304,36 +429,6 @@ runs:
           echo "Trivy scanner error: expected JSON output was not produced." >&2
           exit 2
         fi
-
-        count_vulns() {
-          jq -r '
-            if type == "array" then
-              [ .[]? | .Results[]? | (.Vulnerabilities // []) | length ] | add // 0
-            else
-              [ .Results[]? | (.Vulnerabilities // []) | length ] | add // 0
-            end
-          ' "$1" 2>/dev/null || echo 0
-        }
-
-        count_misconfig() {
-          jq -r '
-            if type == "array" then
-              [ .[]? | .Results[]? | (.Misconfigurations // []) | length ] | add // 0
-            else
-              [ .Results[]? | (.Misconfigurations // []) | length ] | add // 0
-            end
-          ' "$1" 2>/dev/null || echo 0
-        }
-
-        count_secrets() {
-          jq -r '
-            if type == "array" then
-              [ .[]? | .Results[]? | (.Secrets // []) | length ] | add // 0
-            else
-              [ .Results[]? | (.Secrets // []) | length ] | add // 0
-            end
-          ' "$1" 2>/dev/null || echo 0
-        }
 
         total=0
         if [ -n "$tmp_json_fs" ] && [ -s "$tmp_json_fs" ]; then
